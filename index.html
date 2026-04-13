@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Symbol Simon - Gedächtnistraining</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #0f172a;
+            color: white;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .symbol-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            max-width: 400px;
+            width: 90vw;
+        }
+
+        .symbol-btn {
+            aspect-ratio: 1;
+            background-color: #1e293b;
+            border-radius: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2.5rem;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            user-select: none;
+            border: 2px solid transparent;
+        }
+
+        .symbol-btn:active {
+            transform: scale(0.95);
+        }
+
+        .symbol-btn.active {
+            background-color: #38bdf8;
+            box-shadow: 0 0 20px #38bdf8;
+            transform: scale(1.05);
+        }
+
+        .symbol-btn.wrong {
+            background-color: #ef4444;
+            box-shadow: 0 0 20px #ef4444;
+        }
+
+        .symbol-btn.correct-flash {
+            background-color: #22c55e;
+            box-shadow: 0 0 20px #22c55e;
+        }
+
+        .status-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            background: rgba(15, 23, 42, 0.9);
+            padding: 2rem;
+            border-radius: 1.5rem;
+            z-index: 10;
+            border: 1px solid #334155;
+            display: none;
+        }
+
+        .preview-area {
+            height: 100px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 4rem;
+            margin-bottom: 2rem;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); opacity: 0.7; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        .pulse {
+            animation: pulse 0.5s ease-in-out;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="flex flex-col items-center">
+        <div class="mb-8 text-center">
+            <h1 class="text-3xl font-bold tracking-tight text-sky-400">SYMBOL SIMON</h1>
+            <p class="text-slate-400 mt-1">Merk dir die Sequenz!</p>
+            <div class="mt-4 flex gap-4">
+                <div class="bg-slate-800 px-6 py-2 rounded-full border border-slate-700">
+                    Score: <span id="score" class="font-mono text-xl text-white">0</span>
+                </div>
+                <div class="bg-slate-800 px-6 py-2 rounded-full border border-amber-500/50">
+                    Highscore: <span id="highscore" class="font-mono text-xl text-amber-400">0</span>
+                </div>
+            </div>
+        </div>
+
+        <div id="preview-display" class="preview-area text-sky-400"></div>
+
+        <div id="grid" class="symbol-grid"></div>
+
+        <button id="start-btn" class="mt-8 bg-sky-500 hover:bg-sky-400 text-white font-bold py-3 px-8 rounded-xl shadow-lg transition-all active:scale-95">
+            Spiel Starten
+        </button>
+    </div>
+
+    <div id="overlay" class="status-overlay">
+        <h2 id="overlay-title" class="text-3xl font-bold mb-4">Bereit?</h2>
+        <p id="overlay-text" class="text-slate-300 mb-6">Die Symbole werden gleich kurz nacheinander eingeblendet.</p>
+        <button id="overlay-btn" class="bg-sky-500 hover:bg-sky-400 text-white font-bold py-2 px-6 rounded-lg transition-all">
+            LOS GEHT'S
+        </button>
+    </div>
+
+    <script>
+        // Audio Engine
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        function playTone(freq, duration, type = 'sine', volume = 0.1) {
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            oscillator.type = type;
+            oscillator.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            
+            gainNode.gain.setValueAtTime(volume, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + duration);
+        }
+
+        const sounds = {
+            sequence: (index) => playTone(200 + (index * 50), 0.3, 'sine', 0.1),
+            tap: () => playTone(400, 0.1, 'square', 0.05),
+            error: () => {
+                playTone(150, 0.5, 'sawtooth', 0.1);
+                playTone(100, 0.5, 'sawtooth', 0.1);
+            },
+            success: async () => {
+                playTone(400, 0.2, 'sine', 0.1);
+                await sleep(100);
+                playTone(500, 0.2, 'sine', 0.1);
+                await sleep(100);
+                playTone(600, 0.4, 'sine', 0.1);
+            }
+        };
+
+        const symbols = ['⭐', '🌙', '☀️', '🔥', '💧', '🍀', '💎', '🌀', '🎯'];
+        let sequence = [];
+        let playerSequence = [];
+        let score = 0;
+        let highscore = localStorage.getItem('symbol_simon_highscore') || 0;
+        let isShowingSequence = false;
+        let canInput = false;
+
+        const gridElement = document.getElementById('grid');
+        const scoreElement = document.getElementById('score');
+        const highscoreElement = document.getElementById('highscore');
+        const previewDisplay = document.getElementById('preview-display');
+        const startBtn = document.getElementById('start-btn');
+        const overlay = document.getElementById('overlay');
+        const overlayTitle = document.getElementById('overlay-title');
+        const overlayText = document.getElementById('overlay-text');
+        const overlayBtn = document.getElementById('overlay-btn');
+
+        highscoreElement.textContent = highscore;
+
+        function createGrid() {
+            gridElement.innerHTML = '';
+            symbols.forEach((symbol, index) => {
+                const btn = document.createElement('div');
+                btn.className = 'symbol-btn';
+                btn.textContent = symbol;
+                btn.dataset.index = index;
+                btn.onclick = () => handleInput(index);
+                gridElement.appendChild(btn);
+            });
+        }
+
+        async function startGame() {
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+            score = 0;
+            sequence = [];
+            scoreElement.textContent = score;
+            startBtn.classList.add('hidden');
+            nextRound();
+        }
+
+        function nextRound() {
+            playerSequence = [];
+            canInput = false;
+            
+            const increaseAmount = (score === 0) ? 3 : (Math.random() > 0.5 ? 1 : 2);
+            for (let i = 0; i < increaseAmount; i++) {
+                sequence.push(Math.floor(Math.random() * 9));
+            }
+
+            showSequence();
+        }
+
+        async function showSequence() {
+            isShowingSequence = true;
+            previewDisplay.textContent = "Achtung...";
+            await sleep(1000);
+
+            for (let symbolIndex of sequence) {
+                const symbol = symbols[symbolIndex];
+                previewDisplay.textContent = symbol;
+                previewDisplay.classList.add('pulse');
+                
+                const gridBtns = document.querySelectorAll('.symbol-btn');
+                gridBtns[symbolIndex].classList.add('active');
+                
+                sounds.sequence(symbolIndex);
+                
+                await sleep(600);
+                previewDisplay.classList.remove('pulse');
+                gridBtns[symbolIndex].classList.remove('active');
+                await sleep(300);
+            }
+
+            previewDisplay.textContent = "Du bist dran!";
+            canInput = true;
+            isShowingSequence = false;
+        }
+
+        async function handleInput(index) {
+            if (!canInput || isShowingSequence) return;
+
+            const expectedIndex = sequence[playerSequence.length];
+            const btn = document.querySelectorAll('.symbol-btn')[index];
+
+            if (index === expectedIndex) {
+                sounds.tap();
+                playerSequence.push(index);
+                btn.classList.add('correct-flash');
+                setTimeout(() => btn.classList.remove('correct-flash'), 200);
+
+                if (playerSequence.length === sequence.length) {
+                    canInput = false;
+                    score++;
+                    scoreElement.textContent = score;
+                    
+                    if (score > highscore) {
+                        updateHighscore(score);
+                    }
+
+                    previewDisplay.textContent = "Richtig! 🎉";
+                    sounds.success();
+                    await sleep(1200);
+                    nextRound();
+                }
+            } else {
+                canInput = false;
+                sounds.error();
+                btn.classList.add('wrong');
+                previewDisplay.textContent = "Falsch! ❌";
+                setTimeout(() => {
+                    btn.classList.remove('wrong');
+                    showGameOver();
+                }, 500);
+            }
+        }
+
+        function updateHighscore(newScore) {
+            highscore = newScore;
+            localStorage.setItem('symbol_simon_highscore', highscore);
+            highscoreElement.textContent = highscore;
+        }
+
+        function showGameOver() {
+            if (score > highscore) {
+                updateHighscore(score);
+            }
+            
+            overlayTitle.textContent = "Game Over!";
+            overlayText.textContent = `Score: ${score} | Bestwert: ${highscore}`;
+            overlayBtn.textContent = "Nochmal versuchen";
+            overlay.style.display = 'block';
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        overlayBtn.onclick = () => {
+            overlay.style.display = 'none';
+            startGame();
+        };
+
+        startBtn.onclick = () => {
+            startGame();
+        };
+
+        createGrid();
+    </script>
+</body>
+</html>
